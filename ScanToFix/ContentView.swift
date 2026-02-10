@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var screen: Screen = .start
     @StateObject private var lidarManager = LidarScanManager()
     @State private var capturedMesh: ScannedMesh?
+    @State private var repairPatch: RepairPatchResult?
     @State private var selectedVersion: RepairVersion = .v1
     @State private var showExportFormatOptions = false
     @State private var showFileExporter = false
@@ -46,13 +47,17 @@ struct ContentView: View {
                 previewScreen
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeInOut(duration: 0.25), value: screen)
+        .onChange(of: selectedVersion) { _, _ in
+            regeneratePatch(showError: false)
+        }
         .confirmationDialog("Choose Export Format", isPresented: $showExportFormatOptions, titleVisibility: .visible) {
-            Button("USDZ") {
-                exportMesh(.usdz)
-            }
             Button("STL") {
                 exportMesh(.stl)
+            }
+            Button("USDZ") {
+                exportMesh(.usdz)
             }
             Button("Cancel", role: .cancel) {}
         }
@@ -126,6 +131,9 @@ struct ContentView: View {
             Spacer()
 
             StartButton(title: "Start Scan") {
+                capturedMesh = nil
+                repairPatch = nil
+                latestShareURL = nil
                 withAnimation {
                     screen = .scanner
                 }
@@ -138,6 +146,7 @@ struct ContentView: View {
                 .padding(.bottom, 14)
         }
         .padding(.top, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var scannerScreen: some View {
@@ -189,7 +198,7 @@ struct ContentView: View {
 
                         Spacer()
 
-                        DoneButton(isEnabled: lidarManager.isSupported && lidarManager.progress >= 0.45) {
+                        DoneButton(isEnabled: lidarManager.isSupported && lidarManager.progress >= 0.2) {
                             finishScan()
                         }
                     }
@@ -205,6 +214,7 @@ struct ContentView: View {
             }
             .padding(.top, 16)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             lidarManager.startScanning()
         }
@@ -215,19 +225,19 @@ struct ContentView: View {
 
     private var previewScreen: some View {
         VStack(spacing: 16) {
-            Text("3D Preview")
+            Text("Repair Patch Preview")
                 .font(.system(size: 30, weight: .bold, design: .rounded))
                 .foregroundStyle(.black)
                 .padding(.top, 12)
 
             FilePreviewCard(
                 note: selectedVersion.note,
-                detail: meshDetailText(for: selectedVersion)
+                detail: patchDetailText()
             )
                 .padding(.horizontal, 20)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Versions")
+                Text("Patch Profiles")
                     .font(.system(size: 22, weight: .bold, design: .rounded))
                     .foregroundStyle(.black)
 
@@ -253,12 +263,12 @@ struct ContentView: View {
             }
             .padding(.horizontal, 20)
 
-            ExportButton(title: "Export 3D File") {
+            ExportButton(title: "Export Repair Patch") {
                 showExportFormatOptions = true
             }
             .padding(.horizontal, 20)
-            .opacity(capturedMesh == nil ? 0.6 : 1.0)
-            .disabled(capturedMesh == nil)
+            .opacity(repairPatch == nil ? 0.6 : 1.0)
+            .disabled(repairPatch == nil)
 
             Button("Find a local 3D printer") {
                 openLocalPrinterSearch()
@@ -274,6 +284,8 @@ struct ContentView: View {
             }
 
             Button("Scan Another Object") {
+                capturedMesh = nil
+                repairPatch = nil
                 withAnimation {
                     screen = .start
                 }
@@ -283,6 +295,7 @@ struct ContentView: View {
 
             Spacer()
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func finishScan() {
@@ -295,6 +308,9 @@ struct ContentView: View {
             return
         }
         capturedMesh = mesh
+        guard regeneratePatch(showError: true) else {
+            return
+        }
         withAnimation {
             screen = .preview
         }
@@ -302,20 +318,21 @@ struct ContentView: View {
 
     private func cancelScan() {
         lidarManager.stopScanning()
+        capturedMesh = nil
+        repairPatch = nil
         withAnimation {
             screen = .start
         }
     }
 
     private func exportMesh(_ format: MeshExportFormat) {
-        guard let capturedMesh else {
-            alertMessage = "No scanned mesh is available to export."
+        guard let repairPatch else {
+            alertMessage = "No repair patch is available to export."
             return
         }
 
         do {
-            let versionedMesh = capturedMesh.variant(for: selectedVersion)
-            let package = try MeshExporter.makePackage(from: versionedMesh, version: selectedVersion, format: format)
+            let package = try MeshExporter.makePackage(from: repairPatch.patchMesh, version: selectedVersion, format: format)
             exportDocument = MeshFileDocument(data: package.data)
             exportContentType = format.contentType
             exportFilename = package.fileName
@@ -326,12 +343,33 @@ struct ContentView: View {
         }
     }
 
-    private func meshDetailText(for version: RepairVersion) -> String {
-        guard let capturedMesh else {
-            return "No scan data captured yet."
+    private func patchDetailText() -> String {
+        guard let repairPatch else {
+            return "No repair patch generated yet."
         }
-        let variant = capturedMesh.variant(for: version)
-        return "\(variant.vertexCount) vertices • \(variant.faceCount) triangles"
+
+        let patchMesh = repairPatch.patchMesh
+        let perimeterMM = Int((repairPatch.boundaryPerimeter * 1000).rounded())
+        return "\(patchMesh.vertexCount) vertices • \(patchMesh.faceCount) triangles • boundary \(perimeterMM) mm • loops \(repairPatch.detectedBoundaryCount)"
+    }
+
+    @discardableResult
+    private func regeneratePatch(showError: Bool) -> Bool {
+        guard let capturedMesh else {
+            repairPatch = nil
+            return false
+        }
+
+        do {
+            repairPatch = try RepairPatchGenerator.generate(from: capturedMesh, version: selectedVersion)
+            return true
+        } catch {
+            repairPatch = nil
+            if showError {
+                alertMessage = error.localizedDescription
+            }
+            return false
+        }
     }
 
     private func openLocalPrinterSearch() {
@@ -379,6 +417,17 @@ private struct ScannerFrame: View {
 private struct ProgressBar: View {
     let value: Double
 
+    private var normalizedValue: Double {
+        min(max(value, 0), 1)
+    }
+
+    private var displayPercent: Int {
+        if normalizedValue == 0 {
+            return 0
+        }
+        return max(1, Int((normalizedValue * 100).rounded()))
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             GeometryReader { proxy in
@@ -387,12 +436,12 @@ private struct ProgressBar: View {
                         .fill(Color.white.opacity(0.4))
                     Capsule()
                         .fill(Color(red: 0.14, green: 0.56, blue: 0.96))
-                        .frame(width: proxy.size.width * value)
+                        .frame(width: proxy.size.width * normalizedValue)
                 }
             }
             .frame(height: 10)
 
-            Text("\(Int(value * 100))% Scanning Progress")
+            Text("\(displayPercent)% Scanning Progress")
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.95))
         }

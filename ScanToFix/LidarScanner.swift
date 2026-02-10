@@ -7,12 +7,13 @@ import RealityKit
 
 final class LidarScanManager: NSObject, ObservableObject {
     @Published private(set) var progress: Double = 0
-    @Published private(set) var statusMessage = "Move slowly around the object"
+    @Published private(set) var statusMessage = "Place the object still, then move your phone around it"
     @Published private(set) var isSupported = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
 
     private weak var arView: ARView?
+    private var meshAnchorsByID: [UUID: ARMeshAnchor] = [:]
     private var latestFrame: ARFrame?
-    private let targetTriangleCount = 45_000.0
+    private let targetTriangleCount = 8_000.0
 
     func connect(to arView: ARView) {
         if self.arView === arView {
@@ -40,17 +41,19 @@ final class LidarScanManager: NSObject, ObservableObject {
 
         let configuration = ARWorldTrackingConfiguration()
         configuration.environmentTexturing = .automatic
-        configuration.sceneReconstruction = .meshWithClassification
+        configuration.sceneReconstruction = .mesh
 
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             configuration.frameSemantics.insert(.sceneDepth)
         }
 
+        meshAnchorsByID.removeAll()
+        latestFrame = nil
         arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
 
         Task { @MainActor in
             progress = 0
-            statusMessage = "Move slowly around the object"
+            statusMessage = "Place the object still, then move your phone around it"
         }
     }
 
@@ -59,11 +62,9 @@ final class LidarScanManager: NSObject, ObservableObject {
     }
 
     func finalizeScan() -> ScannedMesh? {
-        guard let latestFrame else {
-            return nil
-        }
-
-        let anchors = latestFrame.anchors.compactMap { $0 as? ARMeshAnchor }
+        let anchorsFromCallbacks = Array(meshAnchorsByID.values)
+        let anchorsFromFrame = latestFrame?.anchors.compactMap { $0 as? ARMeshAnchor } ?? []
+        let anchors = anchorsFromCallbacks.isEmpty ? anchorsFromFrame : anchorsFromCallbacks
         let mesh = ScannedMesh(meshAnchors: anchors)
         guard !mesh.isEmpty else {
             return nil
@@ -74,12 +75,58 @@ final class LidarScanManager: NSObject, ObservableObject {
 
     private func statusMessage(for triangleCount: Int) -> String {
         switch triangleCount {
-        case 0..<2_000:
-            return "Move slowly around the object"
-        case 2_000..<8_000:
-            return "Good scan. Capture hidden angles"
+        case 0..<250:
+            return "Place object on a table and move around it slowly"
+        case 250..<1_500:
+            return "Great start. Capture the fracture edge from more angles"
+        case 1_500..<4_500:
+            return "Good scan. Keep circling for cleaner boundary detection"
         default:
             return "Coverage looks strong. Press Done"
+        }
+    }
+
+    private func updateProgressFromMeshAnchors() {
+        let triangleCount = meshAnchorsByID.values.reduce(0) { partialResult, anchor in
+            partialResult + anchor.geometry.faces.count
+        }
+
+        let linearProgress = min(1.0, Double(triangleCount) / targetTriangleCount)
+        let visibleProgress = triangleCount > 0 ? max(0.02, linearProgress) : 0
+        let nextMessage = statusMessage(for: triangleCount)
+
+        Task { @MainActor in
+            progress = visibleProgress
+            statusMessage = nextMessage
+        }
+    }
+
+    private func mergeMeshAnchors(from anchors: [ARAnchor]) {
+        var changed = false
+        for anchor in anchors {
+            guard let meshAnchor = anchor as? ARMeshAnchor else {
+                continue
+            }
+            meshAnchorsByID[meshAnchor.identifier] = meshAnchor
+            changed = true
+        }
+        if changed {
+            updateProgressFromMeshAnchors()
+        }
+    }
+
+    private func removeMeshAnchors(from anchors: [ARAnchor]) {
+        var changed = false
+        for anchor in anchors {
+            guard let meshAnchor = anchor as? ARMeshAnchor else {
+                continue
+            }
+            if meshAnchorsByID.removeValue(forKey: meshAnchor.identifier) != nil {
+                changed = true
+            }
+        }
+        if changed {
+            updateProgressFromMeshAnchors()
         }
     }
 }
@@ -87,20 +134,18 @@ final class LidarScanManager: NSObject, ObservableObject {
 extension LidarScanManager: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         latestFrame = frame
+    }
 
-        let triangleCount = frame.anchors
-            .compactMap { $0 as? ARMeshAnchor }
-            .reduce(0) { partialResult, anchor in
-                partialResult + anchor.geometry.faces.count
-            }
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        mergeMeshAnchors(from: anchors)
+    }
 
-        let nextProgress = min(1.0, Double(triangleCount) / targetTriangleCount)
-        let nextMessage = statusMessage(for: triangleCount)
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        mergeMeshAnchors(from: anchors)
+    }
 
-        Task { @MainActor in
-            progress = nextProgress
-            statusMessage = nextMessage
-        }
+    func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+        removeMeshAnchors(from: anchors)
     }
 
     func session(_ session: ARSession, didFailWithError error: any Error) {
