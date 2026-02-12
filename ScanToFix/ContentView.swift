@@ -5,8 +5,13 @@
 //  Created by 전장우 on 2/11/26.
 //
 
+import SceneKit
 import SwiftUI
 import UniformTypeIdentifiers
+
+#if os(iOS)
+import UIKit
+#endif
 
 struct ContentView: View {
     private enum Screen {
@@ -27,32 +32,56 @@ struct ContentView: View {
     @State private var exportContentType: UTType = .data
     @State private var exportFilename = "ScanToFix"
     @State private var alertMessage: String?
+    @State private var backgroundDrift = false
+    @State private var startIntroActive = false
+    @State private var scannerIntroActive = false
+    @State private var previewIntroActive = false
     @Environment(\.openURL) private var openURL
 
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [Color(red: 0.95, green: 0.97, blue: 1.0), Color.white],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+            appBackground
 
             switch screen {
             case .start:
                 startScreen
+                    .transition(
+                        .asymmetric(
+                            insertion: .move(edge: .leading).combined(with: .opacity),
+                            removal: .opacity
+                        )
+                    )
             case .scanner:
                 scannerScreen
+                    .transition(
+                        .asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .opacity
+                        )
+                    )
             case .preview:
                 previewScreen
+                    .transition(
+                        .asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .opacity
+                        )
+                    )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeInOut(duration: 0.25), value: screen)
+        .animation(.snappy(duration: 0.42, extraBounce: 0.08), value: screen)
         .onChange(of: selectedVersion) { _, _ in
             regeneratePatch(showError: false)
         }
-        .confirmationDialog("Choose Export Format", isPresented: $showExportFormatOptions, titleVisibility: .visible) {
+        .onAppear {
+            backgroundDrift = true
+        }
+        .confirmationDialog(
+            "Choose Export Format",
+            isPresented: $showExportFormatOptions,
+            titleVisibility: .visible
+        ) {
             Button("STL") {
                 exportMesh(.stl)
             }
@@ -88,45 +117,47 @@ struct ContentView: View {
         }
     }
 
+    private var appBackground: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(red: 0.95, green: 0.97, blue: 1.0), Color.white],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            Circle()
+                .fill(Color(red: 0.4, green: 0.72, blue: 1.0).opacity(0.22))
+                .frame(width: 460, height: 460)
+                .blur(radius: 80)
+                .offset(x: backgroundDrift ? 120 : -140, y: backgroundDrift ? -240 : -150)
+                .animation(.easeInOut(duration: 7).repeatForever(autoreverses: true), value: backgroundDrift)
+        }
+        .ignoresSafeArea()
+    }
+
     private var startScreen: some View {
         VStack(spacing: 24) {
-            Spacer(minLength: 18)
+            Spacer(minLength: 20)
 
             VStack(spacing: 8) {
                 Text("Scan to Fix")
-                    .font(.system(size: 36, weight: .bold, design: .rounded))
+                    .font(.system(size: 38, weight: .bold, design: .rounded))
                     .foregroundStyle(.black)
 
                 Text("Scan damaged objects with LiDAR and rebuild missing parts for 3D printing.")
                     .font(.system(size: 16, weight: .regular, design: .rounded))
-                    .foregroundStyle(Color.black.opacity(0.75))
+                    .foregroundStyle(Color.black.opacity(0.74))
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, 24)
             }
+            .opacity(startIntroActive ? 1 : 0)
+            .offset(y: startIntroActive ? 0 : 18)
 
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Color(red: 0.88, green: 0.94, blue: 1.0), Color(red: 0.83, green: 0.9, blue: 1.0)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .overlay {
-                    ZStack {
-                        Circle()
-                            .stroke(Color(red: 0.29, green: 0.58, blue: 0.9).opacity(0.35), lineWidth: 2)
-                            .frame(width: 160, height: 160)
-                        Image(systemName: "gearshape.2.fill")
-                            .font(.system(size: 78))
-                            .foregroundStyle(Color(red: 0.2, green: 0.53, blue: 0.9))
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(Color(red: 0.2, green: 0.53, blue: 0.9), style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
-                            .frame(width: 210, height: 130)
-                    }
-                }
-                .frame(height: 250)
+            StartIllustrationCard()
                 .padding(.horizontal, 20)
+                .opacity(startIntroActive ? 1 : 0)
+                .scaleEffect(startIntroActive ? 1 : 0.96)
+                .offset(y: startIntroActive ? 0 : 22)
 
             Spacer()
 
@@ -139,31 +170,43 @@ struct ContentView: View {
                 }
             }
             .padding(.horizontal, 20)
+            .opacity(startIntroActive ? 1 : 0)
+            .offset(y: startIntroActive ? 0 : 18)
 
             Text(lidarManager.isSupported ? "Requires iPhone Pro with LiDAR" : "LiDAR unavailable on this device.")
                 .font(.system(size: 13, weight: .regular, design: .rounded))
                 .foregroundStyle(.secondary)
-                .padding(.bottom, 14)
+                .padding(.bottom, 16)
+                .opacity(startIntroActive ? 1 : 0)
         }
-        .padding(.top, 16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.top, 14)
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.45)) {
+                startIntroActive = true
+            }
+        }
+        .onDisappear {
+            startIntroActive = false
+        }
     }
 
     private var scannerScreen: some View {
         ZStack {
             LinearGradient(
-                colors: [Color(red: 0.33, green: 0.36, blue: 0.4), Color(red: 0.18, green: 0.19, blue: 0.22)],
+                colors: [Color(red: 0.35, green: 0.38, blue: 0.42), Color(red: 0.19, green: 0.2, blue: 0.24)],
                 startPoint: .top,
                 endPoint: .bottom
             )
             .ignoresSafeArea()
 
-            VStack(spacing: 18) {
+            VStack(spacing: 16) {
                 Spacer(minLength: 8)
 
                 Text("Align object inside frame")
                     .font(.system(size: 18, weight: .medium, design: .rounded))
                     .foregroundStyle(.white.opacity(0.9))
+                    .opacity(scannerIntroActive ? 1 : 0)
+                    .offset(y: scannerIntroActive ? 0 : 10)
 
                 ZStack {
                     LidarScannerView(manager: lidarManager)
@@ -171,22 +214,29 @@ struct ContentView: View {
 
                     ScannerFrame()
 
+                    if lidarManager.isSupported {
+                        ScanningSequenceOverlay(progress: lidarManager.progress)
+                    }
+
                     if !lidarManager.isSupported {
                         RoundedRectangle(cornerRadius: 26, style: .continuous)
-                            .fill(Color.black.opacity(0.45))
+                            .fill(Color.black.opacity(0.48))
                             .overlay {
                                 Text("LiDAR scanning requires an iPhone Pro device.")
                                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                                     .foregroundStyle(.white)
                                     .multilineTextAlignment(.center)
-                                    .padding(.horizontal, 18)
+                                    .padding(.horizontal, 22)
                             }
                     }
                 }
-                .frame(height: 390)
+                .frame(height: 405)
                 .padding(.horizontal, 20)
+                .scaleEffect(scannerIntroActive ? 1 : 0.98)
+                .opacity(scannerIntroActive ? 1 : 0)
+                .offset(y: scannerIntroActive ? 0 : 18)
 
-                VStack(spacing: 16) {
+                VStack(spacing: 14) {
                     ProgressBar(value: lidarManager.progress)
 
                     HStack {
@@ -195,6 +245,7 @@ struct ContentView: View {
                         }
                         .font(.system(size: 17, weight: .medium, design: .rounded))
                         .foregroundStyle(.white.opacity(0.9))
+                        .buttonStyle(FluidPressButtonStyle(pressedScale: 0.97, pressedOpacity: 0.84))
 
                         Spacer()
 
@@ -206,84 +257,112 @@ struct ContentView: View {
                 .padding(18)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .padding(.horizontal, 20)
+                .opacity(scannerIntroActive ? 1 : 0)
+                .offset(y: scannerIntroActive ? 0 : 14)
 
-                Text(lidarManager.statusMessage)
+                Text(lidarManager.isSupported ? "Move slowly around the object" : lidarManager.statusMessage)
                     .font(.system(size: 14, weight: .regular, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.8))
-                    .padding(.bottom, 8)
+                    .foregroundStyle(.white.opacity(0.84))
+                    .padding(.bottom, 10)
+                    .opacity(scannerIntroActive ? 1 : 0)
             }
-            .padding(.top, 16)
+            .padding(.top, 14)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
+            withAnimation(.easeOut(duration: 0.4)) {
+                scannerIntroActive = true
+            }
             lidarManager.startScanning()
         }
         .onDisappear {
+            scannerIntroActive = false
             lidarManager.stopScanning()
         }
     }
 
     private var previewScreen: some View {
         VStack(spacing: 16) {
-            Text("Repair Patch Preview")
-                .font(.system(size: 30, weight: .bold, design: .rounded))
+            Text("3D Preview")
+                .font(.system(size: 34, weight: .bold, design: .rounded))
                 .foregroundStyle(.black)
-                .padding(.top, 12)
+                .padding(.top, 10)
+                .opacity(previewIntroActive ? 1 : 0)
+                .offset(y: previewIntroActive ? 0 : 10)
 
-            FilePreviewCard(
+            ThreeDFilePreview(
+                mesh: repairPatch?.patchMesh ?? capturedMesh,
                 note: selectedVersion.note,
                 detail: patchDetailText()
             )
-                .padding(.horizontal, 20)
+            .padding(.horizontal, 20)
+            .opacity(previewIntroActive ? 1 : 0)
+            .scaleEffect(previewIntroActive ? 1 : 0.98)
+            .offset(y: previewIntroActive ? 0 : 14)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Patch Profiles")
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Versions")
+                    .font(.system(size: 23, weight: .bold, design: .rounded))
                     .foregroundStyle(.black)
 
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     ForEach(RepairVersion.allCases) { version in
                         Button(version.rawValue) {
                             selectedVersion = version
                         }
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(selectedVersion == version ? .white : .black.opacity(0.7))
+                        .foregroundStyle(selectedVersion == version ? .white : .black.opacity(0.75))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
                         .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
                                 .fill(selectedVersion == version ? Color.blue : Color.white)
                         )
                         .overlay {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
                                 .stroke(Color.black.opacity(0.08), lineWidth: 1)
                         }
+                        .buttonStyle(FluidPressButtonStyle(pressedScale: 0.95, pressedOpacity: 0.9))
                     }
                 }
+                .padding(6)
+                .background(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(Color.white.opacity(0.9))
+                )
+                .animation(.snappy(duration: 0.24, extraBounce: 0.04), value: selectedVersion)
             }
             .padding(.horizontal, 20)
+            .opacity(previewIntroActive ? 1 : 0)
+            .offset(y: previewIntroActive ? 0 : 14)
 
-            ExportButton(title: "Export Repair Patch") {
+            ExportButton(title: "Export 3D File") {
                 showExportFormatOptions = true
             }
             .padding(.horizontal, 20)
-            .opacity(repairPatch == nil ? 0.6 : 1.0)
-            .disabled(repairPatch == nil)
+            .opacity(exportableMesh == nil ? 0.68 : 1.0)
+            .disabled(exportableMesh == nil)
+            .opacity(previewIntroActive ? 1 : 0)
+            .offset(y: previewIntroActive ? 0 : 14)
 
             Button("Find a local 3D printer") {
                 openLocalPrinterSearch()
             }
-            .font(.system(size: 18, weight: .medium, design: .rounded))
+            .font(.system(size: 19, weight: .medium, design: .rounded))
             .foregroundStyle(Color(red: 0.11, green: 0.47, blue: 0.88))
+            .buttonStyle(FluidPressButtonStyle(pressedScale: 0.97, pressedOpacity: 0.86))
+            .opacity(previewIntroActive ? 1 : 0)
+            .offset(y: previewIntroActive ? 0 : 14)
 
             if let latestShareURL {
                 ShareLink(item: latestShareURL) {
-                    Label("Share Last Export", systemImage: "square.and.arrow.up")
+                    Label("Share last export", systemImage: "square.and.arrow.up")
                         .font(.system(size: 16, weight: .semibold, design: .rounded))
                 }
+                .opacity(previewIntroActive ? 1 : 0)
+                .offset(y: previewIntroActive ? 0 : 14)
             }
 
-            Button("Scan Another Object") {
+            Button("Scan another object") {
                 capturedMesh = nil
                 repairPatch = nil
                 withAnimation {
@@ -291,11 +370,21 @@ struct ContentView: View {
                 }
             }
             .font(.system(size: 16, weight: .semibold, design: .rounded))
-            .padding(.top, 4)
+            .padding(.top, 2)
+            .buttonStyle(FluidPressButtonStyle(pressedScale: 0.97, pressedOpacity: 0.86))
+            .opacity(previewIntroActive ? 1 : 0)
+            .offset(y: previewIntroActive ? 0 : 14)
 
             Spacer()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.45)) {
+                previewIntroActive = true
+            }
+        }
+        .onDisappear {
+            previewIntroActive = false
+        }
     }
 
     private func finishScan() {
@@ -303,14 +392,14 @@ struct ContentView: View {
             alertMessage = "This device does not support LiDAR mesh reconstruction."
             return
         }
+
         guard let mesh = lidarManager.finalizeScan() else {
             alertMessage = "No mesh captured yet. Keep scanning from a few more angles and try again."
             return
         }
+
         capturedMesh = mesh
-        guard regeneratePatch(showError: true) else {
-            return
-        }
+        _ = regeneratePatch(showError: true)
         withAnimation {
             screen = .preview
         }
@@ -326,13 +415,17 @@ struct ContentView: View {
     }
 
     private func exportMesh(_ format: MeshExportFormat) {
-        guard let repairPatch else {
-            alertMessage = "No repair patch is available to export."
+        guard let mesh = exportableMesh else {
+            alertMessage = "No scanned 3D mesh is available to export."
             return
         }
 
         do {
-            let package = try MeshExporter.makePackage(from: repairPatch.patchMesh, version: selectedVersion, format: format)
+            let package = try MeshExporter.makePackage(
+                from: mesh,
+                version: selectedVersion,
+                format: format
+            )
             exportDocument = MeshFileDocument(data: package.data)
             exportContentType = format.contentType
             exportFilename = package.fileName
@@ -343,8 +436,15 @@ struct ContentView: View {
         }
     }
 
+    private var exportableMesh: ScannedMesh? {
+        repairPatch?.patchMesh ?? capturedMesh
+    }
+
     private func patchDetailText() -> String {
         guard let repairPatch else {
+            if let capturedMesh {
+                return "Raw scan preview • \(capturedMesh.vertexCount) vertices • \(capturedMesh.faceCount) triangles"
+            }
             return "No repair patch generated yet."
         }
 
@@ -380,6 +480,46 @@ struct ContentView: View {
     }
 }
 
+private struct StartIllustrationCard: View {
+    @State private var floatActive = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 24, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [Color(red: 0.86, green: 0.92, blue: 1.0), Color(red: 0.82, green: 0.9, blue: 1.0)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay {
+                ZStack {
+                    Circle()
+                        .stroke(Color(red: 0.28, green: 0.56, blue: 0.9).opacity(0.32), lineWidth: 2)
+                        .frame(width: 164, height: 164)
+
+                    Image(systemName: "gearshape.2.fill")
+                        .font(.system(size: 78))
+                        .foregroundStyle(Color(red: 0.22, green: 0.52, blue: 0.9))
+
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(
+                            Color(red: 0.22, green: 0.52, blue: 0.9),
+                            style: StrokeStyle(lineWidth: 2, dash: [8, 7])
+                        )
+                        .frame(width: 212, height: 132)
+                }
+            }
+            .frame(height: 250)
+            .offset(y: floatActive ? -4 : 4)
+            .scaleEffect(floatActive ? 1.01 : 0.99)
+            .animation(.easeInOut(duration: 2.8).repeatForever(autoreverses: true), value: floatActive)
+            .onAppear {
+                floatActive = true
+            }
+    }
+}
+
 private struct StartButton: View {
     let title: String
     let action: () -> Void
@@ -395,22 +535,182 @@ private struct StartButton: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .fill(
                             LinearGradient(
-                                colors: [Color(red: 0.2, green: 0.55, blue: 0.95), Color(red: 0.1, green: 0.42, blue: 0.86)],
+                                colors: [Color(red: 0.2, green: 0.56, blue: 0.96), Color(red: 0.1, green: 0.43, blue: 0.87)],
                                 startPoint: .leading,
                                 endPoint: .trailing
                             )
                         )
                 )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FluidPressButtonStyle(pressedScale: 0.98, pressedOpacity: 0.88))
+    }
+}
+
+private enum ScannerCornerPosition {
+    case topLeft
+    case topRight
+    case bottomLeft
+    case bottomRight
+}
+
+private struct ScannerCorner: View {
+    let position: ScannerCornerPosition
+    let length: CGFloat
+
+    var body: some View {
+        Path { path in
+            switch position {
+            case .topLeft:
+                path.move(to: CGPoint(x: length, y: 0))
+                path.addLine(to: CGPoint(x: 0, y: 0))
+                path.addLine(to: CGPoint(x: 0, y: length))
+            case .topRight:
+                path.move(to: CGPoint(x: 0, y: 0))
+                path.addLine(to: CGPoint(x: length, y: 0))
+                path.addLine(to: CGPoint(x: length, y: length))
+            case .bottomLeft:
+                path.move(to: CGPoint(x: 0, y: 0))
+                path.addLine(to: CGPoint(x: 0, y: length))
+                path.addLine(to: CGPoint(x: length, y: length))
+            case .bottomRight:
+                path.move(to: CGPoint(x: length, y: 0))
+                path.addLine(to: CGPoint(x: length, y: length))
+                path.addLine(to: CGPoint(x: 0, y: length))
+            }
+        }
+        .stroke(
+            Color(red: 0.56, green: 0.82, blue: 1.0),
+            style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round)
+        )
+        .frame(width: length, height: length)
     }
 }
 
 private struct ScannerFrame: View {
     var body: some View {
-        RoundedRectangle(cornerRadius: 26, style: .continuous)
-            .stroke(Color(red: 0.48, green: 0.77, blue: 1.0), lineWidth: 5)
-            .padding(14)
+        GeometryReader { proxy in
+            let inset: CGFloat = 16
+            let cornerLength = min(proxy.size.width, proxy.size.height) * 0.19
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .stroke(Color(red: 0.56, green: 0.82, blue: 1.0).opacity(0.35), lineWidth: 2)
+                    .padding(inset)
+
+                VStack {
+                    HStack {
+                        ScannerCorner(position: .topLeft, length: cornerLength)
+                        Spacer()
+                        ScannerCorner(position: .topRight, length: cornerLength)
+                    }
+                    Spacer()
+                    HStack {
+                        ScannerCorner(position: .bottomLeft, length: cornerLength)
+                        Spacer()
+                        ScannerCorner(position: .bottomRight, length: cornerLength)
+                    }
+                }
+                .padding(inset + 2)
+            }
+        }
+    }
+}
+
+private struct ScanningSequenceOverlay: View {
+    let progress: Double
+
+    private var guidanceText: String {
+        switch progress {
+        case 0..<0.25:
+            return "Start from the broken edge"
+        case 0.25..<0.7:
+            return "Move around the object slowly"
+        default:
+            return "Coverage looks good"
+        }
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let inset: CGFloat = 28
+            let width = max(0, proxy.size.width - (inset * 2))
+            let height = max(0, proxy.size.height - (inset * 2))
+
+            TimelineView(.animation) { timeline in
+                let cycle = 2.8
+                let t = timeline.date.timeIntervalSinceReferenceDate
+                let phase = (t.truncatingRemainder(dividingBy: cycle)) / cycle
+                let sweepY = CGFloat(phase) * height
+
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(Color.black.opacity(0.07))
+
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.5, green: 0.84, blue: 1.0).opacity(0),
+                                    Color(red: 0.5, green: 0.84, blue: 1.0).opacity(0.45),
+                                    Color(red: 0.5, green: 0.84, blue: 1.0).opacity(0)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .frame(height: 52)
+                        .offset(y: max(0, min(height - 52, sweepY - 26)))
+                        .blendMode(.plusLighter)
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "dot.radiowaves.left.and.right")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("Live Overlay")
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                        }
+
+                        Text(guidanceText)
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .padding(12)
+
+                    ScannerCrosshair()
+                        .stroke(Color.white.opacity(0.82), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                        .frame(width: 34, height: 34)
+                        .position(x: width * 0.5, y: height * 0.5)
+                }
+                .frame(width: width, height: height)
+                .position(x: proxy.size.width * 0.5, y: proxy.size.height * 0.5)
+            }
+        }
+        .allowsHitTesting(false)
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+    }
+}
+
+private struct ScannerCrosshair: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let midX = rect.midX
+        let midY = rect.midY
+
+        path.move(to: CGPoint(x: midX, y: 0))
+        path.addLine(to: CGPoint(x: midX, y: rect.height * 0.32))
+        path.move(to: CGPoint(x: midX, y: rect.height * 0.68))
+        path.addLine(to: CGPoint(x: midX, y: rect.height))
+
+        path.move(to: CGPoint(x: 0, y: midY))
+        path.addLine(to: CGPoint(x: rect.width * 0.32, y: midY))
+        path.move(to: CGPoint(x: rect.width * 0.68, y: midY))
+        path.addLine(to: CGPoint(x: rect.width, y: midY))
+
+        path.addEllipse(in: CGRect(x: midX - 2.5, y: midY - 2.5, width: 5, height: 5))
+        return path
     }
 }
 
@@ -433,17 +733,18 @@ private struct ProgressBar: View {
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule()
-                        .fill(Color.white.opacity(0.4))
+                        .fill(Color.white.opacity(0.45))
                     Capsule()
-                        .fill(Color(red: 0.14, green: 0.56, blue: 0.96))
+                        .fill(Color(red: 0.15, green: 0.57, blue: 0.97))
                         .frame(width: proxy.size.width * normalizedValue)
+                        .animation(.easeOut(duration: 0.24), value: normalizedValue)
                 }
             }
             .frame(height: 10)
 
             Text("\(displayPercent)% Scanning Progress")
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.95))
+                .foregroundStyle(.white.opacity(0.97))
         }
     }
 }
@@ -476,49 +777,37 @@ private struct DoneButton: View {
                         )
                 )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FluidPressButtonStyle(pressedScale: 0.97, pressedOpacity: 0.88))
         .disabled(!isEnabled)
+        .animation(.easeInOut(duration: 0.2), value: isEnabled)
     }
 }
 
-private struct FilePreviewCard: View {
+private struct ThreeDFilePreview: View {
+    let mesh: ScannedMesh?
     let note: String
     let detail: String
+    @State private var breathing = false
 
     var body: some View {
         RoundedRectangle(cornerRadius: 24, style: .continuous)
             .fill(Color.white.opacity(0.95))
             .overlay {
-                VStack(spacing: 18) {
-                    ZStack {
-                        Circle()
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.white, Color(red: 0.85, green: 0.87, blue: 0.9)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                            .frame(width: 210, height: 210)
-                            .shadow(color: .black.opacity(0.15), radius: 10, x: 0, y: 4)
-
-                        Image(systemName: "cup.and.saucer.fill")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 120)
-                            .foregroundStyle(Color(red: 0.72, green: 0.74, blue: 0.77))
-                    }
+                VStack(spacing: 10) {
+                    previewCanvas
+                        .frame(height: 286)
 
                     Text(note)
                         .font(.system(size: 14, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal, 14)
+                        .padding(.horizontal, 10)
 
                     Text(detail)
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Color(red: 0.16, green: 0.43, blue: 0.73))
-                        .padding(.horizontal, 14)
+                        .foregroundStyle(Color(red: 0.16, green: 0.44, blue: 0.74))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 10)
 
                     HStack {
                         Text("Drag to rotate")
@@ -528,12 +817,132 @@ private struct FilePreviewCard: View {
                         Image(systemName: "arrow.triangle.2.circlepath")
                             .foregroundStyle(.secondary)
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 14)
+
+                    Capsule()
+                        .fill(Color.black.opacity(0.15))
+                        .frame(width: 34, height: 4)
+                        .padding(.top, 2)
                 }
-                .padding(.vertical, 20)
+                .padding(14)
             }
-            .frame(height: 380)
+            .frame(height: 420)
             .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
+            .scaleEffect(breathing ? 1 : 0.992)
+            .animation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true), value: breathing)
+            .onAppear {
+                breathing = true
+            }
+    }
+
+    @ViewBuilder
+    private var previewCanvas: some View {
+        RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [Color(red: 0.95, green: 0.96, blue: 0.97), Color(red: 0.89, green: 0.9, blue: 0.92)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .overlay {
+                if let mesh, !mesh.isEmpty {
+                    SceneView(
+                        scene: MeshSceneBuilder.makeScene(from: mesh),
+                        pointOfView: nil,
+                        options: [.allowsCameraControl, .autoenablesDefaultLighting]
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                } else {
+                    VStack(spacing: 8) {
+                        Image(systemName: "cube.transparent")
+                            .font(.system(size: 54))
+                            .foregroundStyle(Color.black.opacity(0.35))
+                        Text("Complete scanning to preview the 3D file.")
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+    }
+}
+
+private enum MeshSceneBuilder {
+    static func makeScene(from mesh: ScannedMesh) -> SCNScene {
+        let scene = SCNScene()
+        guard !mesh.isEmpty else {
+            return scene
+        }
+
+        let vertices = mesh.vertices.map { vertex in
+            SCNVector3(vertex.x, vertex.y, vertex.z)
+        }
+        let vertexSource = SCNGeometrySource(vertices: vertices)
+        let indexData = mesh.faces.withUnsafeBufferPointer { Data(buffer: $0) }
+        let element = SCNGeometryElement(
+            data: indexData,
+            primitiveType: .triangles,
+            primitiveCount: mesh.faceCount,
+            bytesPerIndex: MemoryLayout<UInt32>.size
+        )
+
+        let geometry = SCNGeometry(sources: [vertexSource], elements: [element])
+        let material = SCNMaterial()
+        #if os(iOS)
+        material.diffuse.contents = UIColor(white: 0.96, alpha: 1)
+        material.specular.contents = UIColor(white: 0.62, alpha: 1)
+        #else
+        material.diffuse.contents = NSColor(white: 0.96, alpha: 1)
+        material.specular.contents = NSColor(white: 0.62, alpha: 1)
+        #endif
+        material.roughness.contents = 0.42
+        material.metalness.contents = 0.04
+        material.isDoubleSided = true
+        geometry.materials = [material]
+
+        let meshNode = SCNNode(geometry: geometry)
+        let (minBounds, maxBounds) = geometry.boundingBox
+        let center = SIMD3<Float>(
+            (minBounds.x + maxBounds.x) * 0.5,
+            (minBounds.y + maxBounds.y) * 0.5,
+            (minBounds.z + maxBounds.z) * 0.5
+        )
+        let size = SIMD3<Float>(
+            maxBounds.x - minBounds.x,
+            maxBounds.y - minBounds.y,
+            maxBounds.z - minBounds.z
+        )
+        let longest = max(size.x, max(size.y, size.z))
+        let scale: Float = longest > 0 ? 0.2 / longest : 1
+
+        meshNode.scale = SCNVector3(scale, scale, scale)
+        meshNode.position = SCNVector3(
+            -center.x * scale,
+            -center.y * scale,
+            -center.z * scale
+        )
+        scene.rootNode.addChildNode(meshNode)
+
+        let cameraNode = SCNNode()
+        cameraNode.camera = SCNCamera()
+        cameraNode.camera?.fieldOfView = 42
+        cameraNode.position = SCNVector3(0, 0, 0.33)
+        scene.rootNode.addChildNode(cameraNode)
+
+        let keyLightNode = SCNNode()
+        keyLightNode.light = SCNLight()
+        keyLightNode.light?.type = .omni
+        keyLightNode.light?.intensity = 900
+        keyLightNode.position = SCNVector3(0.2, 0.22, 0.45)
+        scene.rootNode.addChildNode(keyLightNode)
+
+        let fillLightNode = SCNNode()
+        fillLightNode.light = SCNLight()
+        fillLightNode.light?.type = .ambient
+        fillLightNode.light?.intensity = 460
+        scene.rootNode.addChildNode(fillLightNode)
+
+        return scene
     }
 }
 
@@ -559,7 +968,22 @@ private struct ExportButton: View {
                         )
                 )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FluidPressButtonStyle(pressedScale: 0.98, pressedOpacity: 0.88))
+    }
+}
+
+private struct FluidPressButtonStyle: ButtonStyle {
+    var pressedScale: CGFloat = 0.97
+    var pressedOpacity: CGFloat = 0.9
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? pressedScale : 1)
+            .opacity(configuration.isPressed ? pressedOpacity : 1)
+            .animation(
+                .interactiveSpring(response: 0.22, dampingFraction: 0.72, blendDuration: 0.1),
+                value: configuration.isPressed
+            )
     }
 }
 
