@@ -24,6 +24,9 @@ struct ContentView: View {
     @StateObject private var lidarManager = LidarScanManager()
     @State private var capturedMesh: ScannedMesh?
     @State private var repairPatch: RepairPatchResult?
+    @State private var boundaryCandidates: [RepairBoundaryCandidate] = []
+    @State private var selectedBoundaryCandidateID: String?
+    @State private var isBoundaryConfirmed = false
     @State private var selectedVersion: RepairVersion = .v1
     @State private var showExportFormatOptions = false
     @State private var showFileExporter = false
@@ -72,6 +75,10 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.snappy(duration: 0.42, extraBounce: 0.08), value: screen)
         .onChange(of: selectedVersion) { _, _ in
+            regeneratePatch(showError: false)
+        }
+        .onChange(of: selectedBoundaryCandidateID) { _, _ in
+            isBoundaryConfirmed = false
             regeneratePatch(showError: false)
         }
         .onAppear {
@@ -164,6 +171,9 @@ struct ContentView: View {
             StartButton(title: "Start Scan") {
                 capturedMesh = nil
                 repairPatch = nil
+                boundaryCandidates = []
+                selectedBoundaryCandidateID = nil
+                isBoundaryConfirmed = false
                 latestShareURL = nil
                 withAnimation {
                     screen = .scanner
@@ -215,7 +225,7 @@ struct ContentView: View {
                     ScannerFrame()
 
                     if lidarManager.isSupported {
-                        ScanningSequenceOverlay(progress: lidarManager.progress)
+                        LiveObjectOverlay(state: lidarManager.liveOverlayState)
                     }
 
                     if !lidarManager.isSupported {
@@ -237,7 +247,7 @@ struct ContentView: View {
                 .offset(y: scannerIntroActive ? 0 : 18)
 
                 VStack(spacing: 14) {
-                    ProgressBar(value: lidarManager.progress)
+                    ProgressBar(value: lidarManager.qualityProgress)
 
                     HStack {
                         Button("Cancel") {
@@ -249,7 +259,7 @@ struct ContentView: View {
 
                         Spacer()
 
-                        DoneButton(isEnabled: lidarManager.isSupported && lidarManager.progress >= 0.2) {
+                        DoneButton(isEnabled: lidarManager.isSupported && lidarManager.canFinalizeScan) {
                             finishScan()
                         }
                     }
@@ -260,7 +270,7 @@ struct ContentView: View {
                 .opacity(scannerIntroActive ? 1 : 0)
                 .offset(y: scannerIntroActive ? 0 : 14)
 
-                Text(lidarManager.isSupported ? "Move slowly around the object" : lidarManager.statusMessage)
+                Text(lidarManager.statusMessage)
                     .font(.system(size: 14, weight: .regular, design: .rounded))
                     .foregroundStyle(.white.opacity(0.84))
                     .padding(.bottom, 10)
@@ -335,6 +345,16 @@ struct ContentView: View {
             .opacity(previewIntroActive ? 1 : 0)
             .offset(y: previewIntroActive ? 0 : 14)
 
+            BoundarySelectionCard(
+                candidates: boundaryCandidates,
+                selectedCandidateID: $selectedBoundaryCandidateID,
+                isBoundaryConfirmed: isBoundaryConfirmed,
+                confirmAction: confirmSelectedBoundary
+            )
+            .padding(.horizontal, 20)
+            .opacity(previewIntroActive ? 1 : 0)
+            .offset(y: previewIntroActive ? 0 : 14)
+
             ExportButton(title: "Export 3D File") {
                 showExportFormatOptions = true
             }
@@ -343,6 +363,14 @@ struct ContentView: View {
             .disabled(exportableMesh == nil)
             .opacity(previewIntroActive ? 1 : 0)
             .offset(y: previewIntroActive ? 0 : 14)
+
+            if !isBoundaryConfirmed {
+                Text("Confirm fracture boundary to unlock export.")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.72, green: 0.5, blue: 0.15))
+                    .opacity(previewIntroActive ? 1 : 0)
+                    .offset(y: previewIntroActive ? 0 : 14)
+            }
 
             Button("Find a local 3D printer") {
                 openLocalPrinterSearch()
@@ -365,6 +393,9 @@ struct ContentView: View {
             Button("Scan another object") {
                 capturedMesh = nil
                 repairPatch = nil
+                boundaryCandidates = []
+                selectedBoundaryCandidateID = nil
+                isBoundaryConfirmed = false
                 withAnimation {
                     screen = .start
                 }
@@ -399,7 +430,23 @@ struct ContentView: View {
         }
 
         capturedMesh = mesh
-        _ = regeneratePatch(showError: true)
+        boundaryCandidates = RepairPatchGenerator.detectBoundaryCandidates(from: mesh)
+        selectedBoundaryCandidateID = nil
+        isBoundaryConfirmed = false
+
+        guard !boundaryCandidates.isEmpty else {
+            repairPatch = nil
+            alertMessage = RepairPatchGenerationError.noRepairBoundaryFound.localizedDescription
+            return
+        }
+
+        if let topCandidate = boundaryCandidates.first, topCandidate.confidence >= 0.45 {
+            selectedBoundaryCandidateID = topCandidate.id
+            _ = regeneratePatch(showError: true)
+        } else {
+            repairPatch = nil
+        }
+
         withAnimation {
             screen = .preview
         }
@@ -409,6 +456,9 @@ struct ContentView: View {
         lidarManager.stopScanning()
         capturedMesh = nil
         repairPatch = nil
+        boundaryCandidates = []
+        selectedBoundaryCandidateID = nil
+        isBoundaryConfirmed = false
         withAnimation {
             screen = .start
         }
@@ -416,7 +466,7 @@ struct ContentView: View {
 
     private func exportMesh(_ format: MeshExportFormat) {
         guard let mesh = exportableMesh else {
-            alertMessage = "No scanned 3D mesh is available to export."
+            alertMessage = "Confirm a fracture boundary before exporting the repair mesh."
             return
         }
 
@@ -437,31 +487,46 @@ struct ContentView: View {
     }
 
     private var exportableMesh: ScannedMesh? {
-        repairPatch?.patchMesh ?? capturedMesh
+        guard isBoundaryConfirmed else {
+            return nil
+        }
+        return repairPatch?.patchMesh
+    }
+
+    private var selectedBoundaryCandidate: RepairBoundaryCandidate? {
+        guard let selectedBoundaryCandidateID else {
+            return nil
+        }
+        return boundaryCandidates.first { $0.id == selectedBoundaryCandidateID }
     }
 
     private func patchDetailText() -> String {
         guard let repairPatch else {
             if let capturedMesh {
-                return "Raw scan preview • \(capturedMesh.vertexCount) vertices • \(capturedMesh.faceCount) triangles"
+                return "Scan mesh: \(capturedMesh.vertexCount) vertices • \(capturedMesh.faceCount) triangles. Select and confirm a fracture boundary."
             }
             return "No repair patch generated yet."
         }
 
         let patchMesh = repairPatch.patchMesh
         let perimeterMM = Int((repairPatch.boundaryPerimeter * 1000).rounded())
-        return "\(patchMesh.vertexCount) vertices • \(patchMesh.faceCount) triangles • boundary \(perimeterMM) mm • loops \(repairPatch.detectedBoundaryCount)"
+        let confirmationTag = isBoundaryConfirmed ? "confirmed" : "not confirmed"
+        return "\(patchMesh.vertexCount) vertices • \(patchMesh.faceCount) triangles • boundary \(perimeterMM) mm • candidates \(boundaryCandidates.count) • \(confirmationTag)"
     }
 
     @discardableResult
     private func regeneratePatch(showError: Bool) -> Bool {
-        guard let capturedMesh else {
+        guard let capturedMesh, let selectedBoundaryCandidate else {
             repairPatch = nil
             return false
         }
 
         do {
-            repairPatch = try RepairPatchGenerator.generate(from: capturedMesh, version: selectedVersion)
+            repairPatch = try RepairPatchGenerator.generate(
+                from: capturedMesh,
+                version: selectedVersion,
+                candidate: selectedBoundaryCandidate
+            )
             return true
         } catch {
             repairPatch = nil
@@ -470,6 +535,20 @@ struct ContentView: View {
             }
             return false
         }
+    }
+
+    private func confirmSelectedBoundary() {
+        guard selectedBoundaryCandidate != nil else {
+            alertMessage = "Select a fracture boundary candidate first."
+            return
+        }
+
+        guard regeneratePatch(showError: true), repairPatch != nil else {
+            alertMessage = "Could not generate a repair patch from this boundary. Try another candidate or rescan."
+            return
+        }
+
+        isBoundaryConfirmed = true
     }
 
     private func openLocalPrinterSearch() {
@@ -616,101 +695,162 @@ private struct ScannerFrame: View {
     }
 }
 
-private struct ScanningSequenceOverlay: View {
-    let progress: Double
+private struct LiveObjectOverlay: View {
+    let state: LiveScanOverlayState
 
-    private var guidanceText: String {
-        switch progress {
-        case 0..<0.25:
-            return "Start from the broken edge"
-        case 0.25..<0.7:
-            return "Move around the object slowly"
-        default:
-            return "Coverage looks good"
+    private var accentColor: Color {
+        switch state.trackingState {
+        case .searching:
+            return Color(red: 1.0, green: 0.76, blue: 0.31)
+        case .locking, .tracking:
+            return Color(red: 0.42, green: 0.84, blue: 1.0)
+        case .ready:
+            return Color(red: 0.43, green: 0.9, blue: 0.5)
+        }
+    }
+
+    private var statusTitle: String {
+        switch state.trackingState {
+        case .searching:
+            return "Searching"
+        case .locking:
+            return "Locking"
+        case .tracking:
+            return "Tracking"
+        case .ready:
+            return "Ready"
         }
     }
 
     var body: some View {
         GeometryReader { proxy in
-            let inset: CGFloat = 28
-            let width = max(0, proxy.size.width - (inset * 2))
-            let height = max(0, proxy.size.height - (inset * 2))
+            let overlayRect = denormalizedRect(in: proxy.size)
 
-            TimelineView(.animation) { timeline in
-                let cycle = 2.8
-                let t = timeline.date.timeIntervalSinceReferenceDate
-                let phase = (t.truncatingRemainder(dividingBy: cycle)) / cycle
-                let sweepY = CGFloat(phase) * height
-
-                ZStack(alignment: .topLeading) {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .fill(Color.black.opacity(0.07))
-
-                    Rectangle()
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color(red: 0.5, green: 0.84, blue: 1.0).opacity(0),
-                                    Color(red: 0.5, green: 0.84, blue: 1.0).opacity(0.45),
-                                    Color(red: 0.5, green: 0.84, blue: 1.0).opacity(0)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .frame(height: 52)
-                        .offset(y: max(0, min(height - 52, sweepY - 26)))
-                        .blendMode(.plusLighter)
-
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "dot.radiowaves.left.and.right")
-                                .font(.system(size: 11, weight: .bold))
-                            Text("Live Overlay")
-                                .font(.system(size: 11, weight: .bold, design: .rounded))
-                        }
-
-                        Text(guidanceText)
-                            .font(.system(size: 11, weight: .medium, design: .rounded))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .padding(12)
-
-                    ScannerCrosshair()
-                        .stroke(Color.white.opacity(0.82), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                        .frame(width: 34, height: 34)
-                        .position(x: width * 0.5, y: height * 0.5)
+            ZStack(alignment: .topLeading) {
+                if state.hasTrackedRect {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(accentColor, style: StrokeStyle(lineWidth: 3, lineJoin: .round))
+                        .frame(width: overlayRect.width, height: overlayRect.height)
+                        .position(x: overlayRect.midX, y: overlayRect.midY)
+                        .shadow(color: accentColor.opacity(0.45), radius: 8, x: 0, y: 0)
                 }
-                .frame(width: width, height: height)
-                .position(x: proxy.size.width * 0.5, y: proxy.size.height * 0.5)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(statusTitle)
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                    Text("Lock \(Int((state.lockConfidence * 100).rounded()))% • Coverage \(Int((state.coverage * 100).rounded()))%")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    Text(String(format: "%.2fm • %,d triangles", state.distanceMeters, state.triangleCount))
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(accentColor.opacity(0.6), lineWidth: 1)
+                }
+                .padding(12)
+
+                if !state.hasTrackedRect {
+                    Text("Center object and move closer")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.35), in: Capsule())
+                        .position(x: proxy.size.width * 0.5, y: proxy.size.height * 0.78)
+                }
             }
         }
         .allowsHitTesting(false)
         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
+
+    private func denormalizedRect(in size: CGSize) -> CGRect {
+        CGRect(
+            x: state.normalizedRect.minX * size.width,
+            y: state.normalizedRect.minY * size.height,
+            width: state.normalizedRect.width * size.width,
+            height: state.normalizedRect.height * size.height
+        )
+    }
 }
 
-private struct ScannerCrosshair: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let midX = rect.midX
-        let midY = rect.midY
+private struct BoundarySelectionCard: View {
+    let candidates: [RepairBoundaryCandidate]
+    @Binding var selectedCandidateID: String?
+    let isBoundaryConfirmed: Bool
+    let confirmAction: () -> Void
 
-        path.move(to: CGPoint(x: midX, y: 0))
-        path.addLine(to: CGPoint(x: midX, y: rect.height * 0.32))
-        path.move(to: CGPoint(x: midX, y: rect.height * 0.68))
-        path.addLine(to: CGPoint(x: midX, y: rect.height))
+    private var selectedCandidate: RepairBoundaryCandidate? {
+        guard let selectedCandidateID else {
+            return nil
+        }
+        return candidates.first { $0.id == selectedCandidateID }
+    }
 
-        path.move(to: CGPoint(x: 0, y: midY))
-        path.addLine(to: CGPoint(x: rect.width * 0.32, y: midY))
-        path.move(to: CGPoint(x: rect.width * 0.68, y: midY))
-        path.addLine(to: CGPoint(x: rect.width, y: midY))
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Fracture Boundary")
+                .font(.system(size: 21, weight: .bold, design: .rounded))
+                .foregroundStyle(.black)
 
-        path.addEllipse(in: CGRect(x: midX - 2.5, y: midY - 2.5, width: 5, height: 5))
-        return path
+            if candidates.isEmpty {
+                Text("No fracture boundary candidates detected. Rescan the broken edge more closely.")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
+                        let isSelected = selectedCandidateID == candidate.id
+                        Button {
+                            selectedCandidateID = candidate.id
+                        } label: {
+                            VStack(spacing: 3) {
+                                Text("Loop \(index + 1)")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                Text("\(Int((candidate.perimeter * 1000).rounded()))mm • \(Int((candidate.confidence * 100).rounded()))%")
+                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            }
+                            .foregroundStyle(isSelected ? .white : .black.opacity(0.8))
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(isSelected ? Color.blue : Color.white)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                            }
+                        }
+                        .buttonStyle(FluidPressButtonStyle(pressedScale: 0.96, pressedOpacity: 0.88))
+                    }
+                }
+            }
+
+            Button(isBoundaryConfirmed ? "Boundary Confirmed" : "Confirm Boundary") {
+                confirmAction()
+            }
+            .font(.system(size: 15, weight: .bold, design: .rounded))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 11)
+            .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(isBoundaryConfirmed ? Color(red: 0.2, green: 0.66, blue: 0.4) : Color(red: 0.16, green: 0.52, blue: 0.92))
+            )
+            .buttonStyle(FluidPressButtonStyle(pressedScale: 0.97, pressedOpacity: 0.88))
+            .disabled(selectedCandidate == nil || candidates.isEmpty)
+            .opacity((selectedCandidate == nil || candidates.isEmpty) ? 0.6 : 1.0)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(0.92))
+        )
     }
 }
 

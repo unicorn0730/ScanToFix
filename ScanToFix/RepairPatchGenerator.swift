@@ -8,6 +8,15 @@ struct RepairPatchResult {
     let boundaryPerimeter: Float
 }
 
+struct RepairBoundaryCandidate: Identifiable, Hashable {
+    let id: String
+    let indices: [Int]
+    let perimeter: Float
+    let area: Float
+    let score: Float
+    let confidence: Float
+}
+
 enum RepairPatchGenerationError: LocalizedError {
     case sourceMeshEmpty
     case noRepairBoundaryFound
@@ -29,33 +38,59 @@ enum RepairPatchGenerationError: LocalizedError {
 }
 
 enum RepairPatchGenerator {
+    static func detectBoundaryCandidates(from sourceMesh: ScannedMesh) -> [RepairBoundaryCandidate] {
+        guard !sourceMesh.isEmpty else {
+            return []
+        }
+
+        let scoredLoops = scoredBoundaryLoops(
+            from: sourceMesh,
+            minimumBoundaryVertices: 4,
+            maxVertexCount: 220
+        )
+        guard !scoredLoops.isEmpty else {
+            return []
+        }
+
+        return materializeCandidates(from: scoredLoops, limit: 3)
+    }
+
     static func generate(from sourceMesh: ScannedMesh, version: RepairVersion) throws -> RepairPatchResult {
         guard !sourceMesh.isEmpty else {
             throw RepairPatchGenerationError.sourceMeshEmpty
         }
 
         let profile = version.patchProfile
-        let rawBoundaryLoops = extractBoundaryLoops(from: sourceMesh)
-        let simplifiedLoops = rawBoundaryLoops
-            .map { simplifyLoop($0, maxVertexCount: 220) }
-            .filter { $0.count >= profile.minimumBoundaryVertices }
+        let scoredLoops = scoredBoundaryLoops(
+            from: sourceMesh,
+            minimumBoundaryVertices: profile.minimumBoundaryVertices,
+            maxVertexCount: 220
+        )
 
-        guard let selectedLoop = chooseBoundaryLoop(from: simplifiedLoops, vertices: sourceMesh.vertices) else {
+        guard let selectedLoop = scoredLoops.first else {
             throw RepairPatchGenerationError.noRepairBoundaryFound
         }
 
-        let patchMesh = try buildPatchMesh(
-            sourceMesh: sourceMesh,
-            boundaryLoopIndices: selectedLoop.indices,
-            profile: profile
+        let selectedCandidate = makeBoundaryCandidate(
+            loop: selectedLoop,
+            maxScore: scoredLoops.first?.score ?? selectedLoop.score,
+            secondScore: scoredLoops.dropFirst().first?.score ?? 0
         )
 
-        return RepairPatchResult(
-            patchMesh: patchMesh,
-            detectedBoundaryCount: rawBoundaryLoops.count,
-            boundaryVertexCount: selectedLoop.indices.count,
-            boundaryPerimeter: selectedLoop.perimeter
+        return try generate(
+            from: sourceMesh,
+            version: version,
+            candidate: selectedCandidate,
+            detectedBoundaryCount: scoredLoops.count
         )
+    }
+
+    static func generate(
+        from sourceMesh: ScannedMesh,
+        version: RepairVersion,
+        candidate: RepairBoundaryCandidate
+    ) throws -> RepairPatchResult {
+        try generate(from: sourceMesh, version: version, candidate: candidate, detectedBoundaryCount: nil)
     }
 }
 
@@ -63,6 +98,7 @@ private extension RepairPatchGenerator {
     struct LoopCandidate {
         let indices: [Int]
         let perimeter: Float
+        let area: Float
         let score: Float
     }
 
@@ -99,6 +135,143 @@ private extension RepairPatchGenerator {
             let local = point - origin
             return SIMD2<Float>(simd_dot(local, axisU), simd_dot(local, axisV))
         }
+    }
+
+    static func generate(
+        from sourceMesh: ScannedMesh,
+        version: RepairVersion,
+        candidate: RepairBoundaryCandidate,
+        detectedBoundaryCount: Int?
+    ) throws -> RepairPatchResult {
+        guard !sourceMesh.isEmpty else {
+            throw RepairPatchGenerationError.sourceMeshEmpty
+        }
+
+        let profile = version.patchProfile
+        let simplifiedIndices = simplifyLoop(candidate.indices, maxVertexCount: 220)
+
+        guard simplifiedIndices.count >= profile.minimumBoundaryVertices else {
+            throw RepairPatchGenerationError.boundaryTooSmall
+        }
+
+        let patchMesh = try buildPatchMesh(
+            sourceMesh: sourceMesh,
+            boundaryLoopIndices: simplifiedIndices,
+            profile: profile
+        )
+
+        let boundaryCount: Int
+        if let detectedBoundaryCount {
+            boundaryCount = detectedBoundaryCount
+        } else {
+            boundaryCount = scoredBoundaryLoops(
+                from: sourceMesh,
+                minimumBoundaryVertices: profile.minimumBoundaryVertices,
+                maxVertexCount: 220
+            ).count
+        }
+
+        return RepairPatchResult(
+            patchMesh: patchMesh,
+            detectedBoundaryCount: boundaryCount,
+            boundaryVertexCount: simplifiedIndices.count,
+            boundaryPerimeter: candidate.perimeter
+        )
+    }
+
+    static func scoredBoundaryLoops(
+        from mesh: ScannedMesh,
+        minimumBoundaryVertices: Int,
+        maxVertexCount: Int
+    ) -> [LoopCandidate] {
+        let rawBoundaryLoops = extractBoundaryLoops(from: mesh)
+        let simplifiedLoops = rawBoundaryLoops
+            .map { simplifyLoop($0, maxVertexCount: maxVertexCount) }
+            .filter { $0.count >= minimumBoundaryVertices }
+
+        let loopCandidates = simplifiedLoops.compactMap {
+            scoreLoopCandidate(indices: $0, vertices: mesh.vertices)
+        }
+
+        return loopCandidates.sorted { lhs, rhs in
+            lhs.score > rhs.score
+        }
+    }
+
+    static func materializeCandidates(
+        from scoredLoops: [LoopCandidate],
+        limit: Int
+    ) -> [RepairBoundaryCandidate] {
+        guard !scoredLoops.isEmpty else {
+            return []
+        }
+
+        let topLoops = Array(scoredLoops.prefix(max(1, limit)))
+        let maxScore = topLoops.first?.score ?? 0
+        let secondScore = topLoops.dropFirst().first?.score ?? 0
+
+        return topLoops.map {
+            makeBoundaryCandidate(loop: $0, maxScore: maxScore, secondScore: secondScore)
+        }
+    }
+
+    static func makeBoundaryCandidate(
+        loop: LoopCandidate,
+        maxScore: Float,
+        secondScore: Float
+    ) -> RepairBoundaryCandidate {
+        let normalizedScore = clamp01(Double(loop.score) / max(Double(maxScore), 0.000001))
+        let separationScore = clamp01(Double(loop.score - secondScore) / max(Double(loop.score), 0.000001))
+        let confidence = Float(clamp01((0.7 * normalizedScore) + (0.3 * separationScore)))
+
+        return RepairBoundaryCandidate(
+            id: stableLoopIdentifier(indices: loop.indices),
+            indices: loop.indices,
+            perimeter: loop.perimeter,
+            area: loop.area,
+            score: loop.score,
+            confidence: confidence
+        )
+    }
+
+    static func stableLoopIdentifier(indices: [Int]) -> String {
+        var hash: UInt64 = 1_469_598_103_934_665_603
+        let prime: UInt64 = 1_099_511_628_211
+
+        for index in indices {
+            hash ^= UInt64(index)
+            hash &*= prime
+        }
+
+        return String(hash, radix: 16)
+    }
+
+    static func scoreLoopCandidate(indices loop: [Int], vertices: [SIMD3<Float>]) -> LoopCandidate? {
+        let points = loop.map { vertices[$0] }
+        let perimeter = polygonPerimeter(points)
+        if perimeter < 0.01 {
+            return nil
+        }
+
+        let rawNormal = newellNormal(points)
+        let normalLength = simd_length(rawNormal)
+        if normalLength < 0.0001 {
+            return nil
+        }
+        let normal = rawNormal / normalLength
+
+        let centroid = polygonCentroid(points)
+        let basis = PlaneBasis(origin: centroid, normal: normal)
+        let projected = points.map { basis.project($0) }
+        let area = abs(signedArea(projected))
+        if area < 0.000001 {
+            return nil
+        }
+
+        let compactness = max(0, min(1, (4 * Float.pi * area) / max(perimeter * perimeter, 0.000001)))
+        let score = area * (0.45 + compactness)
+
+        return LoopCandidate(indices: loop, perimeter: perimeter, area: area, score: score)
     }
 
     static func extractBoundaryLoops(from mesh: ScannedMesh) -> [[Int]] {
@@ -200,44 +373,6 @@ private extension RepairPatchGenerator {
         }
 
         return simplified
-    }
-
-    static func chooseBoundaryLoop(from loops: [[Int]], vertices: [SIMD3<Float>]) -> LoopCandidate? {
-        var bestCandidate: LoopCandidate?
-
-        for loop in loops {
-            let points = loop.map { vertices[$0] }
-            let perimeter = polygonPerimeter(points)
-            if perimeter < 0.01 {
-                continue
-            }
-
-            let rawNormal = newellNormal(points)
-            let normalLength = simd_length(rawNormal)
-            if normalLength < 0.0001 {
-                continue
-            }
-            let normal = rawNormal / normalLength
-
-            let centroid = polygonCentroid(points)
-            let basis = PlaneBasis(origin: centroid, normal: normal)
-            let projected = points.map { basis.project($0) }
-            let area = abs(signedArea(projected))
-            if area < 0.000001 {
-                continue
-            }
-
-            let compactness = max(0, min(1, (4 * Float.pi * area) / max(perimeter * perimeter, 0.000001)))
-            let score = area * (0.45 + compactness)
-            let candidate = LoopCandidate(indices: loop, perimeter: perimeter, score: score)
-
-            if let bestCandidate, bestCandidate.score >= candidate.score {
-                continue
-            }
-            bestCandidate = candidate
-        }
-
-        return bestCandidate
     }
 
     static func buildPatchMesh(
@@ -521,5 +656,9 @@ private extension RepairPatchGenerator {
         }
 
         return filtered
+    }
+
+    static func clamp01(_ value: Double) -> Double {
+        min(max(value, 0), 1)
     }
 }
